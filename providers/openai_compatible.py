@@ -31,6 +31,19 @@ class OpenAICompatibleProvider(ModelProvider):
     DEFAULT_HEADERS = {}
     FRIENDLY_NAME = "OpenAI Compatible"
 
+    # Subclasses whose API accepts a top-level ``reasoning`` request field
+    # (e.g. OpenRouter) set this to True so thinking_mode maps to reasoning effort.
+    SUPPORTS_REASONING_PARAM = False
+
+    # thinking_mode -> reasoning effort label sent to the API
+    REASONING_EFFORT_MAP = {
+        "minimal": "low",
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "max": "high",
+    }
+
     def __init__(self, api_key: str, base_url: str = None, **kwargs):
         """Initialize the provider with API key and optional base URL.
 
@@ -496,6 +509,21 @@ class OpenAICompatibleProvider(ModelProvider):
             logging.error(error_msg)
             raise RuntimeError(error_msg) from exc
 
+    def _build_reasoning_body(self, capabilities: Optional[ModelCapabilities], thinking_mode: Optional[str]):
+        """Return ``{"reasoning": {"effort": ...}}`` when applicable, else None."""
+        if not self.SUPPORTS_REASONING_PARAM or capabilities is None:
+            return None
+        if not getattr(capabilities, "supports_extended_thinking", False):
+            return None
+        effort = None
+        if thinking_mode:
+            effort = self.REASONING_EFFORT_MAP.get(thinking_mode)
+        if effort is None:
+            effort = getattr(capabilities, "default_reasoning_effort", None)
+        if not effort:
+            return None
+        return {"reasoning": {"effort": effort}}
+
     def generate_content(
         self,
         prompt: str,
@@ -609,6 +637,10 @@ class OpenAICompatibleProvider(ModelProvider):
                     continue  # Skip unsupported parameters for reasoning models
                 completion_params[key] = value
 
+        reasoning_body = self._build_reasoning_body(capabilities, kwargs.get("thinking_mode"))
+        if reasoning_body:
+            completion_params["extra_body"] = reasoning_body
+
         # Check if this model needs the Responses API endpoint
         # Prefer capability metadata; fall back to static map when capabilities unavailable
         use_responses_api = False
@@ -640,8 +672,27 @@ class OpenAICompatibleProvider(ModelProvider):
             attempt_counter["value"] += 1
             response = self.client.chat.completions.create(**completion_params)
 
-            content = response.choices[0].message.content
+            message = response.choices[0].message
+            content = message.content
             usage = self._extract_usage(response)
+
+            metadata = {
+                "finish_reason": response.choices[0].finish_reason,
+                "model": response.model,
+                "id": response.id,
+                "created": response.created,
+            }
+            if reasoning_body:
+                reasoning = getattr(message, "reasoning", None)
+                if isinstance(reasoning, str) and reasoning:
+                    metadata["reasoning"] = reasoning
+                reasoning_details = getattr(message, "reasoning_details", None)
+                if isinstance(reasoning_details, list) and reasoning_details:
+                    metadata["reasoning_details"] = reasoning_details
+                details = getattr(getattr(response, "usage", None), "completion_tokens_details", None)
+                reasoning_tokens = getattr(details, "reasoning_tokens", None)
+                if isinstance(reasoning_tokens, int):
+                    metadata["reasoning_tokens"] = reasoning_tokens
 
             return ModelResponse(
                 content=content,
@@ -649,12 +700,7 @@ class OpenAICompatibleProvider(ModelProvider):
                 model_name=resolved_model,
                 friendly_name=self.FRIENDLY_NAME,
                 provider=self.get_provider_type(),
-                metadata={
-                    "finish_reason": response.choices[0].finish_reason,
-                    "model": response.model,
-                    "id": response.id,
-                    "created": response.created,
-                },
+                metadata=metadata,
             )
 
         try:

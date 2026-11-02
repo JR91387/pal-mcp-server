@@ -32,6 +32,7 @@ class OpenRouterProvider(OpenAICompatibleProvider):
     """
 
     FRIENDLY_NAME = "OpenRouter"
+    SUPPORTS_REASONING_PARAM = True
 
     # Custom headers required by OpenRouter
     DEFAULT_HEADERS = {

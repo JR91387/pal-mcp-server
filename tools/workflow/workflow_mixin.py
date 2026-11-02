@@ -1528,7 +1528,9 @@ class BaseWorkflowMixin(ABC):
                         "note": "Analysis provided in plain text format",
                     }
             else:
-                return {"error": "No response from model", "status": "empty_response"}
+                from utils.empty_response import empty_response_result
+
+                return empty_response_result(model_response, model_name)
 
         except Exception as e:
             logger.error(f"Error calling expert analysis: {e}", exc_info=True)

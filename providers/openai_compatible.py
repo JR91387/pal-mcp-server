@@ -11,7 +11,7 @@ from openai import OpenAI
 from utils.env import get_env, suppress_env_vars
 from utils.image_utils import validate_image
 
-from .base import ModelProvider
+from .base import EmptyResponseError, ModelProvider
 from .shared import (
     ModelCapabilities,
     ModelResponse,
@@ -635,13 +635,37 @@ class OpenAICompatibleProvider(ModelProvider):
         max_retries = 4  # Total of 4 attempts
         retry_delays = [1, 3, 5, 8]  # Progressive delays: 1s, 3s, 5s, 8s
         attempt_counter = {"value": 0}
+        empty_seen = {"value": False}
 
         def _attempt() -> ModelResponse:
             attempt_counter["value"] += 1
             response = self.client.chat.completions.create(**completion_params)
 
             content = response.choices[0].message.content
+            finish_reason = response.choices[0].finish_reason
             usage = self._extract_usage(response)
+
+            metadata = {
+                "finish_reason": finish_reason,
+                "model": response.model,
+                "id": response.id,
+                "generation_id": response.id,
+                "created": response.created,
+            }
+            details = getattr(getattr(response, "usage", None), "completion_tokens_details", None)
+            reasoning_tokens = getattr(details, "reasoning_tokens", None)
+            if isinstance(reasoning_tokens, int) and not isinstance(reasoning_tokens, bool):
+                metadata["reasoning_tokens"] = reasoning_tokens
+
+            if not (content or "").strip() and finish_reason != "length":
+                if not empty_seen["value"]:
+                    # Retry exactly once; a second empty body is returned as-is for diagnostics.
+                    empty_seen["value"] = True
+                    raise EmptyResponseError(
+                        f"empty response body from {resolved_model} (finish_reason={finish_reason}, "
+                        f"generation_id={response.id}); retrying once"
+                    )
+                metadata["empty_retried"] = True
 
             return ModelResponse(
                 content=content,
@@ -649,12 +673,7 @@ class OpenAICompatibleProvider(ModelProvider):
                 model_name=resolved_model,
                 friendly_name=self.FRIENDLY_NAME,
                 provider=self.get_provider_type(),
-                metadata={
-                    "finish_reason": response.choices[0].finish_reason,
-                    "model": response.model,
-                    "id": response.id,
-                    "created": response.created,
-                },
+                metadata=metadata,
             )
 
         try:

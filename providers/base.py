@@ -13,6 +13,10 @@ from .shared import ModelCapabilities, ModelResponse, ProviderType
 logger = logging.getLogger(__name__)
 
 
+class EmptyResponseError(Exception):
+    """Raised when a provider returns an empty body that is worth one retry."""
+
+
 class ModelProvider(ABC):
     """Abstract base class for all model backends in the MCP server.
 
@@ -277,7 +281,7 @@ class ModelProvider(ABC):
                 attempt_number = attempt_index + 1
 
                 # Decide whether to retry based on subclass hook
-                retryable = self._is_error_retryable(exc)
+                retryable = isinstance(exc, EmptyResponseError) or self._is_error_retryable(exc)
                 if not retryable or attempt_number >= attempts:
                     raise
 

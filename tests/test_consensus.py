@@ -130,7 +130,7 @@ class TestConsensusTool:
         assert "hypothesis" not in schema["properties"]
         assert "issues_found" not in schema["properties"]
         assert "temperature" not in schema["properties"]
-        assert "thinking_mode" not in schema["properties"]
+        assert "thinking_mode" in schema["properties"]
 
         # Images should be present now
         assert "images" in schema["properties"]

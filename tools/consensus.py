@@ -28,7 +28,7 @@ from mcp.types import TextContent
 
 from config import TEMPERATURE_ANALYTICAL
 from systemprompts import CONSENSUS_PROMPT
-from tools.shared.base_models import ConsolidatedFindings, WorkflowRequest
+from tools.shared.base_models import COMMON_FIELD_DESCRIPTIONS, ConsolidatedFindings, WorkflowRequest
 from utils.conversation_memory import MAX_CONVERSATION_TURNS, create_thread, get_thread
 
 from .workflow.base import WorkflowTool
@@ -94,7 +94,7 @@ class ConsensusRequest(WorkflowRequest):
 
     # Override inherited fields to exclude them from schema
     temperature: float | None = Field(default=None, exclude=True)
-    thinking_mode: str | None = Field(default=None, exclude=True)
+    thinking_mode: str | None = Field(default=None, description=COMMON_FIELD_DESCRIPTIONS["thinking_mode"])
 
     # Not used in consensus workflow
     files_checked: list[str] | None = Field(default_factory=list, exclude=True)
@@ -139,6 +139,7 @@ class ConsensusTool(WorkflowTool):
         super().__init__()
         self.initial_prompt: str | None = None
         self.original_proposal: str | None = None  # Store the original proposal separately
+        self._session_thinking_mode: str | None = None  # Per-session reasoning depth for every seat
         self.models_to_consult: list[dict] = []
         self.accumulated_responses: list[dict] = []
         self._current_arguments: dict[str, Any] = {}
@@ -298,7 +299,6 @@ of the evidence, even when it strongly points in one direction.""",
         excluded_common_fields = [
             "model",  # Consensus uses 'models' field instead
             "temperature",  # Not used in consensus workflow
-            "thinking_mode",  # Not used in consensus workflow
         ]
 
         requires_model = self.requires_model()
@@ -456,6 +456,7 @@ of the evidence, even when it strongly points in one direction.""",
 
             # Store the original proposal from step 1 - this is what all models should see
             self.store_initial_issue(request.step)
+            self._session_thinking_mode = request.thinking_mode
             self.initial_request = request.step
             self.models_to_consult = request.models or []
             self.accumulated_responses = []
@@ -620,7 +621,7 @@ of the evidence, even when it strongly points in one direction.""",
                 model_name=model_name,
                 system_prompt=system_prompt,
                 temperature=validated_temperature,
-                thinking_mode="medium",
+                thinking_mode=getattr(request, "thinking_mode", None) or self._session_thinking_mode or "medium",
                 images=request.images if request.images else None,
             )
 

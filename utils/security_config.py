@@ -16,6 +16,8 @@ DANGEROUS_SYSTEM_PATHS = {
     "/bin",
     "/var",
     "/root",
+    "/proc",  # /proc/self/environ exposes the server's API keys
+    "/sys",
     "C:\\Windows",
     "C:\\Program Files",
 }

@@ -3,6 +3,7 @@
 import copy
 import ipaddress
 import logging
+import time
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -291,6 +292,8 @@ class OpenAICompatibleProvider(ModelProvider):
                     client_kwargs = {
                         "api_key": self.api_key,
                         "http_client": http_client,
+                        # PAL's _run_with_retries is the only retry layer
+                        "max_retries": 0,
                     }
 
                     if self.base_url:
@@ -318,7 +321,7 @@ class OpenAICompatibleProvider(ModelProvider):
                         e,
                     )
                     try:
-                        minimal_kwargs = {"api_key": self.api_key}
+                        minimal_kwargs = {"api_key": self.api_key, "max_retries": 0}
                         if self.base_url:
                             minimal_kwargs["base_url"] = self.base_url
                         self._client = OpenAI(**minimal_kwargs)
@@ -581,13 +584,16 @@ class OpenAICompatibleProvider(ModelProvider):
             messages.append({"role": "user", "content": user_content})
 
         # Prepare completion parameters
-        # Always disable streaming for OpenRouter
-        # MCP doesn't use streaming, and this avoids issues with O3 model access
+        # Streaming is opt-in via PAL_STREAM_RESPONSES (default off). Streaming keeps bytes
+        # flowing so edge proxies do not 504 on long reasoning-model requests.
+        stream_enabled = self._streaming_enabled()
         completion_params = {
             "model": resolved_model,
             "messages": messages,
-            "stream": False,
+            "stream": stream_enabled,
         }
+        if stream_enabled:
+            completion_params["stream_options"] = {"include_usage": True}
 
         # Use the effective temperature we calculated earlier
         supports_sampling = effective_temperature is not None
@@ -638,7 +644,26 @@ class OpenAICompatibleProvider(ModelProvider):
 
         def _attempt() -> ModelResponse:
             attempt_counter["value"] += 1
-            response = self.client.chat.completions.create(**completion_params)
+            prompt_chars = sum(len(str(m.get("content", ""))) for m in messages)
+            use_stream = bool(completion_params.get("stream"))
+            logging.info(
+                "%s request sent: model=%s stream=%s prompt_chars~%d",
+                self.FRIENDLY_NAME,
+                resolved_model,
+                "on" if use_stream else "off",
+                prompt_chars,
+            )
+            started = time.monotonic()
+            if use_stream:
+                response = self._collect_stream(self.client.chat.completions.create(**completion_params), started)
+            else:
+                response = self.client.chat.completions.create(**completion_params)
+                logging.info(
+                    "%s response received: model=%s after %.1fs",
+                    self.FRIENDLY_NAME,
+                    resolved_model,
+                    time.monotonic() - started,
+                )
 
             content = response.choices[0].message.content
             usage = self._extract_usage(response)
@@ -672,6 +697,49 @@ class OpenAICompatibleProvider(ModelProvider):
             )
             logging.error(error_msg)
             raise RuntimeError(error_msg) from exc
+
+    @staticmethod
+    def _streaming_enabled() -> bool:
+        """True when PAL_STREAM_RESPONSES is set to a truthy value (default off)."""
+        return (get_env("PAL_STREAM_RESPONSES", "false") or "").strip().lower() in ("true", "1", "yes", "on")
+
+    def _collect_stream(self, stream, started: float):
+        """Assemble streamed chat-completion chunks into a non-stream-shaped response object."""
+        from types import SimpleNamespace
+
+        parts: list[str] = []
+        finish_reason = None
+        model = None
+        resp_id = None
+        created = None
+        usage = None
+        first = True
+        for chunk in stream:
+            if first:
+                first = False
+                logging.info(
+                    "%s first stream chunk received after %.1fs", self.FRIENDLY_NAME, time.monotonic() - started
+                )
+            model = getattr(chunk, "model", None) or model
+            resp_id = getattr(chunk, "id", None) or resp_id
+            created = getattr(chunk, "created", None) or created
+            if getattr(chunk, "usage", None):
+                usage = chunk.usage
+            for choice in getattr(chunk, "choices", None) or []:
+                delta = getattr(choice, "delta", None)
+                text = getattr(delta, "content", None) if delta is not None else None
+                if text:
+                    parts.append(text)
+                if getattr(choice, "finish_reason", None):
+                    finish_reason = choice.finish_reason
+        message = SimpleNamespace(content="".join(parts))
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=message, finish_reason=finish_reason)],
+            usage=usage,
+            model=model,
+            id=resp_id,
+            created=created,
+        )
 
     def validate_parameters(self, model_name: str, temperature: float, **kwargs) -> None:
         """Validate model parameters.
